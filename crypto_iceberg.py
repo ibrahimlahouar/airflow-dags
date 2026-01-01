@@ -10,8 +10,8 @@ from botocore.client import Config
 
 # Configuration
 MINIO_ENDPOINT = "http://minio.minio.svc:9000"  # Interne cluster
-MINIO_ACCESS_KEY = "minio"
-MINIO_SECRET_KEY = "minio123"
+MINIO_ACCESS_KEY = "minioadmin"
+MINIO_SECRET_KEY = "minioadmin123"
 BUCKET_NAME = "bronze"
 SCRIPT_BUCKET = "scripts"
 NESSIE_URI = "http://nessie.nessie.svc:19120/api/v1"
@@ -156,13 +156,18 @@ with DAG(
             "--master", "k8s://https://kubernetes.default.svc",
             "--deploy-mode", "cluster",
             "--name", "crypto-ingest",
-            "--packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.77.1,org.apache.hadoop:hadoop-aws:3.3.4",
+            "--packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.77.1,org.apache.hadoop:hadoop-aws:3.3.4,org.open-metadata:openmetadata-spark-agent:1.2.3",
             "--conf", "spark.kubernetes.container.image=apache/spark:3.5.0",
             "--conf", f"spark.hadoop.fs.s3a.endpoint={MINIO_ENDPOINT}",
-            "--conf", "spark.hadoop.fs.s3a.access.key=minio",
-            "--conf", "spark.hadoop.fs.s3a.secret.key=minio123",
+            "--conf", "spark.hadoop.fs.s3a.access.key=minioadmin",
+            "--conf", "spark.hadoop.fs.s3a.secret.key=minioadmin123",
             "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
             "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "--conf", "spark.extraListeners=org.openmetadata.spark.agent.OpenMetadataSparkListener",
+            "--conf", "spark.openmetadata.transport.hostPort=http://openmetadata.openmetadata.svc:8585",
+            "--conf", "spark.openmetadata.identity.authorization.provider=no-auth",
+            "--conf", "spark.openmetadata.transport.pipelineName=crypto_iceberg_pipeline",
+            "--conf", "spark.openmetadata.transport.pipelineSourceUrl=http://airflow.airflow.svc:8080/tree?dag_id=crypto_iceberg_pipeline",
             f"s3a://{SCRIPT_BUCKET}/ingest_crypto.py",
             "{{ task_instance.xcom_pull(task_ids='fetch_prices_and_upload_script') }}"
         ]
