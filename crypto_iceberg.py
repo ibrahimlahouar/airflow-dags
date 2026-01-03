@@ -232,16 +232,9 @@ def main(raw_input_path: str) -> None:
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS nessie.crypto")
     spark.sql(
-        """
-        CREATE TABLE IF NOT EXISTS nessie.crypto.crypto_prices (
-          id STRING,
-          symbol STRING,
-          name STRING,
-          price_usd DOUBLE,
-          api_timestamp BIGINT,
-          ingestion_time TIMESTAMP
-        ) USING iceberg
-        """
+        "CREATE TABLE IF NOT EXISTS nessie.crypto.crypto_prices ("
+        "id STRING, symbol STRING, name STRING, price_usd DOUBLE, "
+        "api_timestamp BIGINT, ingestion_time TIMESTAMP) USING iceberg"
     )
 
     exploded.writeTo("nessie.crypto.crypto_prices").append()
