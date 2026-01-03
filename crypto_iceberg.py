@@ -72,7 +72,8 @@ def fetch_crypto_prices(**context) -> dict:
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     # Wrap response in dict format similar to old API
-    payload = {"data": resp.json(), "timestamp": int(context["ts_nodash"][:14])}
+    import time
+    payload = {"data": resp.json(), "timestamp": int(time.time() * 1000)}
 
     s3 = _minio_client()
     _ensure_bucket(s3, BUCKET_WAREHOUSE)
