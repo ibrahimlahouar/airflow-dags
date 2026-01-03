@@ -67,11 +67,12 @@ def _ensure_bucket(s3, bucket: str) -> None:
 def fetch_crypto_prices(**context) -> dict:
     """Fetch a public API and store raw JSON in MinIO."""
 
-    # Public API (stable demo). You can switch to another API later.
-    url = "https://api.coincap.io/v2/assets?limit=20"
+    # Using CoinGecko API (free, no auth required)
+    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&per_page=20"
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    payload = resp.json()
+    # Wrap response in dict format similar to old API
+    payload = {"data": resp.json(), "timestamp": int(context["ts_nodash"][:14])}
 
     s3 = _minio_client()
     _ensure_bucket(s3, BUCKET_WAREHOUSE)
@@ -217,14 +218,14 @@ def main(raw_input_path: str) -> None:
 
     df = spark.read.json(raw_input_path)
 
-    # CoinCap shape: { data: [..], timestamp: <ms> }
+    # CoinGecko shape: { data: [{id, symbol, name, current_price, ...}], timestamp: <int> }
     exploded = (
         df.select(explode(col("data")).alias("coin"), col("timestamp").alias("api_timestamp"))
         .select(
             col("coin.id").alias("id"),
             col("coin.symbol").alias("symbol"),
             col("coin.name").alias("name"),
-            col("coin.priceUsd").cast("double").alias("price_usd"),
+            col("coin.current_price").cast("double").alias("price_usd"),
             col("api_timestamp").cast("long").alias("api_timestamp"),
             current_timestamp().alias("ingestion_time"),
         )
