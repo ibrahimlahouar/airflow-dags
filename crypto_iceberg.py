@@ -33,8 +33,14 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# NOTE: This DAG is meant to be a simple end-to-end demo:
+# NOTE: Data Platform Pipeline
 # API (HTTPS) -> raw JSON on MinIO (S3) -> SparkOperator job writes Iceberg tables via Nessie -> queryable by Trino.
+#
+# Data is organized by date:
+#   - Raw: s3://warehouse/raw/crypto_prices/dt=YYYY-MM-DD/data.json
+#   - Iceberg: Partitioned by ingestion_date column
+#
+# For bigger data volumes, consider: GitHub Archive (~3-5M events/day), Wikipedia Pageviews, OpenSky Network
 
 # -----------------
 # Cluster endpoints
@@ -149,9 +155,14 @@ def fetch_crypto_prices(**context) -> dict:
     s3 = _minio_client()
     _ensure_bucket(s3, BUCKET_WAREHOUSE)
 
+    # Extract execution date for partitioning (format: YYYY-MM-DD)
+    execution_date = context["ds"]  # e.g., "2026-01-04"
     ts = context["ts_nodash"]
-    raw_key = f"{RAW_PREFIX}/{ts}/data.json"
+    
+    # Organize raw data by date: raw/crypto_prices/dt=YYYY-MM-DD/data.json
+    raw_key = f"{RAW_PREFIX}/dt={execution_date}/data.json"
     s3.put_object(Bucket=BUCKET_WAREHOUSE, Key=raw_key, Body=json.dumps(payload).encode("utf-8"))
+    logger.info(f"Saved raw data to s3://{BUCKET_WAREHOUSE}/{raw_key}")
 
     # Upload Spark script to the same bucket so Spark can load it via s3a://
     script_key = f"{SCRIPTS_PREFIX}/crypto_to_iceberg.py"
@@ -161,6 +172,7 @@ def fetch_crypto_prices(**context) -> dict:
         "raw_s3a_path": f"s3a://{BUCKET_WAREHOUSE}/{raw_key}",
         "script_s3a_path": f"s3a://{BUCKET_WAREHOUSE}/{script_key}",
         "ts": ts,
+        "execution_date": execution_date,  # Pass date for Iceberg partitioning
     }
 
 
@@ -202,6 +214,7 @@ def submit_spark_application(**context) -> str:
     raw_path = xcom["raw_s3a_path"]
     script_path = xcom["script_s3a_path"]
     ts = xcom["ts"]
+    execution_date = xcom["execution_date"]  # For Iceberg partitioning
 
     app_name = f"crypto-iceberg-{ts.lower()}".replace("_", "-")
 
@@ -230,7 +243,7 @@ def submit_spark_application(**context) -> str:
             "image": "apache/spark:3.5.0",
             "imagePullPolicy": "IfNotPresent",
             "mainApplicationFile": script_path,
-            "arguments": [raw_path],
+            "arguments": [raw_path, execution_date],  # Pass date for partitioning
             "sparkVersion": "3.5.0",
             "restartPolicy": {"type": "Never"},
             "timeToLiveSeconds": 60,  # Auto-cleanup pods 60s after job completion
@@ -373,11 +386,18 @@ def _save_driver_logs(core_api, app_name: str) -> None:
 
 _SPARK_SCRIPT = """\
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, explode, current_timestamp
+from pyspark.sql.functions import col, explode, current_timestamp, lit, to_date
 import sys
 
 
-def main(raw_input_path: str) -> None:
+def main(raw_input_path: str, ingestion_date: str) -> None:
+    \"\"\"
+    Process crypto prices and write to Iceberg table partitioned by ingestion_date.
+    
+    Args:
+        raw_input_path: S3 path to raw JSON data
+        ingestion_date: Date string (YYYY-MM-DD) for partitioning
+    \"\"\"
     spark = SparkSession.builder.appName("crypto_to_iceberg").getOrCreate()
 
     df = spark.read.json(raw_input_path)
@@ -390,25 +410,44 @@ def main(raw_input_path: str) -> None:
             col("coin.symbol").alias("symbol"),
             col("coin.name").alias("name"),
             col("coin.current_price").cast("double").alias("price_usd"),
+            col("coin.market_cap").cast("double").alias("market_cap"),
+            col("coin.total_volume").cast("double").alias("volume_24h"),
             col("api_timestamp").cast("long").alias("api_timestamp"),
             current_timestamp().alias("ingestion_time"),
+            to_date(lit(ingestion_date)).alias("ingestion_date"),  # Partition column
         )
     )
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS nessie.crypto")
-    spark.sql(
-        "CREATE TABLE IF NOT EXISTS nessie.crypto.crypto_prices ("
-        "id STRING, symbol STRING, name STRING, price_usd DOUBLE, "
-        "api_timestamp BIGINT, ingestion_time TIMESTAMP) USING iceberg"
-    )
+    
+    # Create table with partitioning by ingestion_date
+    spark.sql(\"\"\"
+        CREATE TABLE IF NOT EXISTS nessie.crypto.crypto_prices (
+            id STRING,
+            symbol STRING,
+            name STRING,
+            price_usd DOUBLE,
+            market_cap DOUBLE,
+            volume_24h DOUBLE,
+            api_timestamp BIGINT,
+            ingestion_time TIMESTAMP,
+            ingestion_date DATE
+        ) USING iceberg
+        PARTITIONED BY (ingestion_date)
+    \"\"\")
 
     exploded.writeTo("nessie.crypto.crypto_prices").append()
+    
+    print(f"Successfully wrote {exploded.count()} records for date {ingestion_date}")
 
     spark.stop()
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if len(sys.argv) != 3:
+        print("Usage: crypto_to_iceberg.py <raw_input_path> <ingestion_date>")
+        sys.exit(1)
+    main(sys.argv[1], sys.argv[2])
 """
 
 
