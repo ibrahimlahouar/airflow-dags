@@ -198,17 +198,9 @@ def _build_spark_conf(om_jwt_token: str | None, app_name: str) -> dict:
         "spark.jars.ivy": "/tmp/ivy2",
     }
 
-    # OpenMetadata Spark Agent Configuration (for Spark job lineage)
-    if om_jwt_token:
-        spark_conf.update({
-            "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
-            "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
-            "spark.openmetadata.transport.jwtToken": om_jwt_token,
-            "spark.openmetadata.transport.pipelineServiceName": "airflow",
-            "spark.openmetadata.transport.pipelineName": app_name,
-            "spark.openmetadata.identity.authorizationProvider": "openmetadata",
-            "spark.openmetadata.cluster.name": "local-k8s",
-        })
+    # Spark lineage: OpenMetadata Spark Agent NOT available on Maven Central
+    # Requires custom Spark image with JAR from GitHub releases
+    _ = om_jwt_token, app_name  # Keep for future use
     
     return spark_conf
 
@@ -265,8 +257,6 @@ def submit_spark_application(**context) -> str:
                     # S3A / AWS SDK v1 bundle (common with Hadoop 3.3.x)
                     "org.apache.hadoop:hadoop-aws:3.3.4",
                     "com.amazonaws:aws-java-sdk-bundle:1.12.262",
-                    # OpenMetadata Spark Agent (groupId: org.open-metadata with hyphen!)
-                    "org.open-metadata:openmetadata-spark-agent:1.0.0",
                 ]
             },
             "sparkConf": _build_spark_conf(om_jwt_token, app_name),
