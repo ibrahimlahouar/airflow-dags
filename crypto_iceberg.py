@@ -139,6 +139,11 @@ def submit_spark_application(**context) -> str:
     api = client.CustomObjectsApi()
 
     # SparkApplication spec (SparkOperator v1beta2)
+    # Retrieve OpenMetadata JWT Token from Airflow Variable or use a placeholder
+    # Ideally, store this in an Airflow Variable: 'openmetadata_jwt_token'
+    from airflow.models import Variable
+    om_jwt_token = Variable.get("openmetadata_jwt_token", default_var="REPLACE_WITH_YOUR_JWT_TOKEN")
+
     spark_app = {
         "apiVersion": "sparkoperator.k8s.io/v1beta2",
         "kind": "SparkApplication",
@@ -161,6 +166,8 @@ def submit_spark_application(**context) -> str:
                     # S3A / AWS SDK v1 bundle (common with Hadoop 3.3.x)
                     "org.apache.hadoop:hadoop-aws:3.3.4",
                     "com.amazonaws:aws-java-sdk-bundle:1.12.262",
+                    # OpenMetadata Spark Agent
+                    "io.openmetadata:openmetadata-spark-agent:1.4.0",
                 ]
             },
             "sparkConf": {
@@ -181,6 +188,12 @@ def submit_spark_application(**context) -> str:
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 # Ivy Cache for dependency resolution
                 "spark.jars.ivy": "/tmp/ivy2",
+                # OpenMetadata Configuration
+                "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
+                "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
+                "spark.openmetadata.identity.authorizationProvider": "openmetadata",
+                "spark.openmetadata.security.jwt.token": om_jwt_token,
+                "spark.openmetadata.cluster.name": "local-k8s",
             },
             "driver": {
                 "cores": 1,
