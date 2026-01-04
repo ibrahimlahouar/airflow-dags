@@ -67,13 +67,42 @@ def _ensure_bucket(s3, bucket: str) -> None:
 def fetch_crypto_prices(**context) -> dict:
     """Fetch a public API and store raw JSON in MinIO."""
 
-    # Using CoinGecko API (free, no auth required)
-    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&per_page=20"
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    # Wrap response in dict format similar to old API
+    # Fetch data from CoinGecko (attempting to fetch ~1000 coins to increase volume)
+    # Note: Getting 100MB from this free API is not feasible (would require ~100k+ calls).
+    # We will fetch 4 pages of 250 items to demonstrate a larger dataset (~1000 rows).
+    all_coins = []
+    
+    # Imports are at top level, but ensuring time is available if not
     import time
-    payload = {"data": resp.json(), "timestamp": int(time.time() * 1000)}
+
+    base_url = "https://api.coingecko.com/api/v3/coins/markets"
+    
+    for page in range(1, 5):
+        try:
+            params = {
+                "vs_currency": "usd",
+                "per_page": 250,
+                "page": page
+            }
+            resp = requests.get(base_url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if not data:
+                break
+                
+            all_coins.extend(data)
+            print(f"Fetched page {page}: {len(data)} coins")
+            
+            # Respect rate limits for free tier
+            time.sleep(1.5)
+            
+        except Exception as e:
+            print(f"Stopping fetch at page {page} due to error: {e}")
+            break
+
+    # Wrap response in dict format 
+    payload = {"data": all_coins, "timestamp": int(time.time() * 1000)}
 
     s3 = _minio_client()
     _ensure_bucket(s3, BUCKET_WAREHOUSE)
@@ -117,17 +146,18 @@ def submit_spark_application(**context) -> str:
         "spec": {
             "type": "Python",
             "mode": "cluster",
-            "image": "apache/spark-py:v3.5.0",
+            "image": "apache/spark:3.5.0",
             "imagePullPolicy": "IfNotPresent",
             "mainApplicationFile": script_path,
             "arguments": [raw_path],
             "sparkVersion": "3.5.0",
             "restartPolicy": {"type": "Never"},
+            "volumes": [{"name": "ivy-cache", "emptyDir": {}}],
             "deps": {
                 "packages": [
                     # Iceberg + Nessie extensions for Spark 3.5 (Scala 2.12)
                     "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
-                    "org.projectnessie:nessie-spark-extensions-3.5_2.12:0.87.0",
+                    "org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.104.5",
                     # S3A / AWS SDK v1 bundle (common with Hadoop 3.3.x)
                     "org.apache.hadoop:hadoop-aws:3.3.4",
                     "com.amazonaws:aws-java-sdk-bundle:1.12.262",
@@ -149,12 +179,16 @@ def submit_spark_application(**context) -> str:
                 "spark.hadoop.fs.s3a.secret.key": MINIO_SECRET_KEY,
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                # Ivy Cache for dependency resolution
+                "spark.jars.ivy": "/tmp/ivy2",
             },
             "driver": {
                 "cores": 1,
                 "coreLimit": "1200m",
                 "memory": "1024m",
-                "serviceAccount": "spark",  # default SA in spark namespace is typically fine
+                "serviceAccount": "spark",
+                "securityContext": {"runAsUser": 0},
+                "volumeMounts": [{"name": "ivy-cache", "mountPath": "/tmp/ivy2"}],
             },
             "executor": {
                 "instances": 1,
