@@ -14,6 +14,19 @@ from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
+# OpenMetadata Lineage Operator
+try:
+    from airflow_provider_openmetadata.lineage.operator import OpenMetadataLineageOperator
+    from metadata.generated.schema.entity.services.connections.metadata.openMetadataConnection import (
+        OpenMetadataConnection,
+    )
+    from metadata.generated.schema.security.client.openMetadataJWTClientConfig import (
+        OpenMetadataJWTClientConfig,
+    )
+    OPENMETADATA_AVAILABLE = True
+except ImportError:
+    OPENMETADATA_AVAILABLE = False
+
 # -----------------
 # Logging Configuration
 # -----------------
@@ -40,6 +53,10 @@ SCRIPTS_PREFIX = "scripts"
 # SparkOperator (SparkApplication CRD)
 SPARKAPP_NAMESPACE = "spark"
 
+# OpenMetadata Configuration
+OPENMETADATA_HOST = "http://openmetadata.openmetadata.svc:8585/api"
+OPENMETADATA_SERVICE_NAME = "airflow"  # Pipeline service name in OpenMetadata
+
 # -----------------
 # Airflow DAG config
 # -----------------
@@ -61,6 +78,23 @@ def _minio_client():
         aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version="s3v4"),
         verify=False,
+    )
+
+
+def _get_openmetadata_config():
+    """Build OpenMetadata connection config for lineage operator."""
+    if not OPENMETADATA_AVAILABLE:
+        return None
+    
+    try:
+        jwt_token = Variable.get("openmetadata_jwt_token")
+    except KeyError:
+        logger.warning("Variable 'openmetadata_jwt_token' not found. OpenMetadata lineage disabled.")
+        return None
+    
+    return OpenMetadataConnection(
+        hostPort=OPENMETADATA_HOST,
+        securityConfig=OpenMetadataJWTClientConfig(jwtToken=jwt_token),
     )
 
 
@@ -400,7 +434,7 @@ with DAG(
     schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
-    tags=["demo", "crypto", "minio", "iceberg", "nessie", "spark"],
+    tags=["demo", "crypto", "minio", "iceberg", "nessie", "spark", "openmetadata"],
 ) as dag:
     fetch = PythonOperator(
         task_id="fetch_crypto_prices",
@@ -412,4 +446,21 @@ with DAG(
         python_callable=submit_spark_application,
     )
 
-    fetch >> spark_ingest
+    # OpenMetadata Lineage - publish pipeline metadata after completion
+    if OPENMETADATA_AVAILABLE:
+        om_config = _get_openmetadata_config()
+        if om_config:
+            publish_lineage = OpenMetadataLineageOperator(
+                task_id="publish_openmetadata_lineage",
+                server_config=om_config,
+                service_name=OPENMETADATA_SERVICE_NAME,
+                only_keep_dag_lineage=False,  # Keep task-level lineage too
+                trigger_rule="all_done",  # Run even if upstream fails
+            )
+            fetch >> spark_ingest >> publish_lineage
+        else:
+            logger.warning("OpenMetadata config not available - lineage task skipped")
+            fetch >> spark_ingest
+    else:
+        logger.info("OpenMetadata provider not installed - lineage task skipped")
+        fetch >> spark_ingest
