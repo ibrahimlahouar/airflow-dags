@@ -186,17 +186,22 @@ def _build_spark_conf(om_jwt_token: str | None, app_name: str) -> dict:
         "spark.jars.ivy": "/tmp/ivy2",
     }
 
-    # OpenMetadata Spark Agent Configuration (for Spark job lineage)
-    if om_jwt_token:
-        spark_conf.update({
-            "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
-            "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
-            "spark.openmetadata.transport.jwtToken": om_jwt_token,
-            "spark.openmetadata.transport.pipelineServiceName": "airflow",
-            "spark.openmetadata.transport.pipelineName": app_name,
-            "spark.openmetadata.identity.authorizationProvider": "openmetadata",
-            "spark.openmetadata.cluster.name": "local-k8s",
-        })
+    # OpenMetadata Spark Agent Configuration (DISABLED - agent JAR not on Maven Central)
+    # To enable Spark-level lineage:
+    # 1. Download JAR from https://github.com/open-metadata/OpenMetadata/releases
+    # 2. Build custom Spark image with JAR in /opt/spark/jars/
+    # 3. Uncomment the config below:
+    # if om_jwt_token:
+    #     spark_conf.update({
+    #         "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
+    #         "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
+    #         "spark.openmetadata.transport.jwtToken": om_jwt_token,
+    #         "spark.openmetadata.transport.pipelineServiceName": "airflow",
+    #         "spark.openmetadata.transport.pipelineName": app_name,
+    #         "spark.openmetadata.identity.authorizationProvider": "openmetadata",
+    #         "spark.openmetadata.cluster.name": "local-k8s",
+    #     })
+    _ = om_jwt_token, app_name  # Keep params for future use
     
     return spark_conf
 
@@ -252,8 +257,9 @@ def submit_spark_application(**context) -> str:
                     # S3A / AWS SDK v1 bundle (common with Hadoop 3.3.x)
                     "org.apache.hadoop:hadoop-aws:3.3.4",
                     "com.amazonaws:aws-java-sdk-bundle:1.12.262",
-                    # OpenMetadata Spark Agent for lineage tracking
-                    "io.openmetadata:openmetadata-spark-agent:1.2.0",
+                    # NOTE: OpenMetadata Spark Agent is NOT on Maven Central
+                    # For Spark-level lineage, build a custom image with the JAR from:
+                    # https://github.com/open-metadata/OpenMetadata/releases
                 ]
             },
             "sparkConf": _build_spark_conf(om_jwt_token, app_name),
