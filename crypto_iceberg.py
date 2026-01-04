@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import timedelta
 
@@ -9,8 +10,15 @@ import requests
 from botocore.client import Config
 
 from airflow import DAG
+from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
+
+# -----------------
+# Logging Configuration
+# -----------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # NOTE: This DAG is meant to be a simple end-to-end demo:
 # API (HTTPS) -> raw JSON on MinIO (S3) -> SparkOperator job writes Iceberg tables via Nessie -> queryable by Trino.
@@ -92,13 +100,13 @@ def fetch_crypto_prices(**context) -> dict:
                 break
                 
             all_coins.extend(data)
-            print(f"Fetched page {page}: {len(data)} coins")
+            logger.info(f"Fetched page {page}: {len(data)} coins")
             
             # Respect rate limits for free tier
             time.sleep(1.5)
             
         except Exception as e:
-            print(f"Stopping fetch at page {page} due to error: {e}")
+            logger.warning(f"Stopping fetch at page {page} due to error: {e}")
             break
 
     # Wrap response in dict format 
@@ -122,6 +130,43 @@ def fetch_crypto_prices(**context) -> dict:
     }
 
 
+def _build_spark_conf(om_jwt_token: str | None, app_name: str) -> dict:
+    """Build Spark configuration with optional OpenMetadata integration."""
+    spark_conf = {
+        # Nessie + Iceberg
+        "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions",
+        "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.nessie.catalog-impl": "org.apache.iceberg.nessie.NessieCatalog",
+        "spark.sql.catalog.nessie.uri": NESSIE_URI,
+        "spark.sql.catalog.nessie.ref": "main",
+        "spark.sql.catalog.nessie.authentication.type": "NONE",
+        "spark.sql.catalog.nessie.warehouse": f"s3a://{BUCKET_WAREHOUSE}/",
+        # MinIO (S3A)
+        "spark.hadoop.fs.s3a.endpoint": MINIO_ENDPOINT,
+        "spark.hadoop.fs.s3a.path.style.access": "true",
+        "spark.hadoop.fs.s3a.access.key": MINIO_ACCESS_KEY,
+        "spark.hadoop.fs.s3a.secret.key": MINIO_SECRET_KEY,
+        "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        # Ivy Cache for dependency resolution
+        "spark.jars.ivy": "/tmp/ivy2",
+    }
+
+    # OpenMetadata Configuration (only if token is available)
+    if om_jwt_token:
+        spark_conf.update({
+            "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
+            "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
+            "spark.openmetadata.transport.jwtToken": om_jwt_token,
+            "spark.openmetadata.transport.pipelineServiceName": "airflow",
+            "spark.openmetadata.transport.pipelineName": app_name,
+            "spark.openmetadata.identity.authorizationProvider": "openmetadata",
+            "spark.openmetadata.cluster.name": "local-k8s",
+        })
+    
+    return spark_conf
+
+
 def submit_spark_application(**context) -> str:
     """Create a SparkApplication in the spark namespace and wait for completion."""
 
@@ -139,10 +184,16 @@ def submit_spark_application(**context) -> str:
     api = client.CustomObjectsApi()
 
     # SparkApplication spec (SparkOperator v1beta2)
-    # Retrieve OpenMetadata JWT Token from Airflow Variable or use a placeholder
-    # Ideally, store this in an Airflow Variable: 'openmetadata_jwt_token'
-    from airflow.models import Variable
-    om_jwt_token = Variable.get("openmetadata_jwt_token", default_var="eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NjczMjU0MzUsImV4cCI6bnVsbH0.IaXHTidmPOku_3Q9wWNaGJ7HNCR6LHleZnklnW8JZ5GoWZsckKfTpKK9wTMd3ULt8nNIA-64e-KEJQ8xuNu3ZINwjyDFEr6w_gAl9DpaCYkwSacUzSbn1q9JtflCjxCSHOmnx8MI8Gsx0gjxlgBIQo7vf7U5bxMO3ahNcpiq5_nsZiCn-qq2tuZ3cup6wRaNkpBSyk34J-t2LMRsu-4veKViHSVzqhfUMcOgFpvGK2wugYv7gJ-i7NV1T4osGrQk_fD1DXeIlJRA5hJLqGl-5lGj1_2qZ60E-WqYG6tDdApLtNz-i8hIIlzlTt7Bv_t_pTMA1qXGJpI_R5iqFBL6LA")
+    # Retrieve OpenMetadata JWT Token from Airflow Variable
+    try:
+        om_jwt_token = Variable.get("openmetadata_jwt_token")
+        logger.info("OpenMetadata JWT token retrieved from Airflow Variable")
+    except KeyError:
+        logger.warning(
+            "Variable 'openmetadata_jwt_token' not found. "
+            "OpenMetadata lineage will not be available for this Spark job."
+        )
+        om_jwt_token = None
 
     spark_app = {
         "apiVersion": "sparkoperator.k8s.io/v1beta2",
@@ -157,6 +208,7 @@ def submit_spark_application(**context) -> str:
             "arguments": [raw_path],
             "sparkVersion": "3.5.0",
             "restartPolicy": {"type": "Never"},
+            "timeToLiveSeconds": 60,  # Auto-cleanup pods 60s after job completion
             "volumes": [{"name": "ivy-cache", "emptyDir": {}}],
             "deps": {
                 "packages": [
@@ -167,34 +219,10 @@ def submit_spark_application(**context) -> str:
                     "org.apache.hadoop:hadoop-aws:3.3.4",
                     "com.amazonaws:aws-java-sdk-bundle:1.12.262",
                     # OpenMetadata Spark Agent
-                    "io.openmetadata:openmetadata-spark-agent:1.4.0",
+                    "io.openmetadata:openmetadata-spark-agent:1.0-beta",
                 ]
             },
-            "sparkConf": {
-                # Nessie + Iceberg
-                "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions",
-                "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog",
-                "spark.sql.catalog.nessie.catalog-impl": "org.apache.iceberg.nessie.NessieCatalog",
-                "spark.sql.catalog.nessie.uri": NESSIE_URI,
-                "spark.sql.catalog.nessie.ref": "main",
-                "spark.sql.catalog.nessie.authentication.type": "NONE",
-                "spark.sql.catalog.nessie.warehouse": f"s3a://{BUCKET_WAREHOUSE}/",
-                # MinIO (S3A)
-                "spark.hadoop.fs.s3a.endpoint": MINIO_ENDPOINT,
-                "spark.hadoop.fs.s3a.path.style.access": "true",
-                "spark.hadoop.fs.s3a.access.key": MINIO_ACCESS_KEY,
-                "spark.hadoop.fs.s3a.secret.key": MINIO_SECRET_KEY,
-                "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-                "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
-                # Ivy Cache for dependency resolution
-                "spark.jars.ivy": "/tmp/ivy2",
-                # OpenMetadata Configuration
-                "spark.extraListeners": "org.openmetadata.spark.agent.OpenMetadataSparkListener",
-                "spark.openmetadata.transport.hostPort": "http://openmetadata.openmetadata.svc:8585",
-                "spark.openmetadata.identity.authorizationProvider": "openmetadata",
-                "spark.openmetadata.security.jwt.token": om_jwt_token,
-                "spark.openmetadata.cluster.name": "local-k8s",
-            },
+            "sparkConf": _build_spark_conf(om_jwt_token, app_name),
             "driver": {
                 "cores": 1,
                 "coreLimit": "1200m",
@@ -235,24 +263,89 @@ def submit_spark_application(**context) -> str:
     # Wait for completion
     timeout_s = 30 * 60
     start = time.time()
-    while True:
-        obj = api.get_namespaced_custom_object(
-            group="sparkoperator.k8s.io",
-            version="v1beta2",
-            namespace=SPARKAPP_NAMESPACE,
-            plural="sparkapplications",
-            name=app_name,
-        )
-        app_state = (((obj.get("status") or {}).get("applicationState") or {}).get("state") or "").upper()
-        if app_state in {"COMPLETED", "FAILED"}:
-            if app_state == "FAILED":
-                raise RuntimeError(f"SparkApplication {app_name} failed: {obj.get('status')}")
-            break
-        if time.time() - start > timeout_s:
-            raise TimeoutError(f"Timed out waiting for SparkApplication {app_name} to complete")
-        time.sleep(10)
+    core_api = client.CoreV1Api()
+    last_state = None
+    final_status = None
+    
+    logger.info(f"Waiting for SparkApplication {app_name} to complete (timeout: {timeout_s}s)...")
+    
+    try:
+        while True:
+            obj = api.get_namespaced_custom_object(
+                group="sparkoperator.k8s.io",
+                version="v1beta2",
+                namespace=SPARKAPP_NAMESPACE,
+                plural="sparkapplications",
+                name=app_name,
+            )
+            app_state = (((obj.get("status") or {}).get("applicationState") or {}).get("state") or "").upper()
+            
+            # Log state only when it changes
+            if app_state != last_state:
+                elapsed = int(time.time() - start)
+                logger.info(f"SparkApplication {app_name} state: {app_state or 'UNKNOWN'} (elapsed: {elapsed}s)")
+                last_state = app_state
+            
+            if app_state in {"COMPLETED", "FAILED"}:
+                final_status = obj.get("status")
+                if app_state == "FAILED":
+                    logger.error(f"SparkApplication {app_name} FAILED. Full status: {json.dumps(final_status, indent=2)}")
+                    raise RuntimeError(f"SparkApplication {app_name} failed: {final_status}")
+                logger.info(f"SparkApplication {app_name} completed successfully")
+                break
+            
+            if time.time() - start > timeout_s:
+                final_status = obj.get("status")
+                logger.error(f"SparkApplication {app_name} TIMEOUT. Full status: {json.dumps(final_status, indent=2)}")
+                raise TimeoutError(f"Timed out waiting for SparkApplication {app_name} to complete")
+            
+            time.sleep(10)
+
+    finally:
+        # Fetch and save driver logs to Airflow worker /tmp and MinIO
+        _save_driver_logs(core_api, app_name)
 
     return app_name
+
+
+def _save_driver_logs(core_api, app_name: str) -> None:
+    """Fetch driver logs, save locally and upload to MinIO for persistence."""
+    driver_pod_name = f"{app_name}-driver"
+    
+    try:
+        logger.info(f"Fetching logs for pod {driver_pod_name} in namespace {SPARKAPP_NAMESPACE}...")
+        logs = core_api.read_namespaced_pod_log(name=driver_pod_name, namespace=SPARKAPP_NAMESPACE)
+        
+        # Save locally to /tmp
+        log_path = f"/tmp/{app_name}.log"
+        with open(log_path, "w") as f:
+            f.write(logs)
+        logger.info(f"Saved Spark Driver logs to: {log_path}")
+        
+        # Log last 100 lines to Airflow logs for quick debugging
+        log_lines = logs.splitlines()
+        last_100_lines = log_lines[-100:] if len(log_lines) > 100 else log_lines
+        logger.info(f"=== Last {len(last_100_lines)} lines of Spark Driver logs ===")
+        for line in last_100_lines:
+            logger.info(f"[DRIVER] {line}")
+        logger.info("=== End of Spark Driver logs ===")
+        
+        # Upload to MinIO for persistence
+        try:
+            s3 = _minio_client()
+            _ensure_bucket(s3, BUCKET_WAREHOUSE)
+            s3_log_key = f"airflow-logs/spark/{app_name}.log"
+            s3.put_object(
+                Bucket=BUCKET_WAREHOUSE,
+                Key=s3_log_key,
+                Body=logs.encode("utf-8"),
+            )
+            logger.info(f"Uploaded Spark Driver logs to s3://{BUCKET_WAREHOUSE}/{s3_log_key}")
+        except Exception as upload_err:
+            logger.warning(f"Failed to upload driver logs to MinIO: {upload_err}")
+            
+    except Exception as e:
+        logger.warning(f"Could not fetch/save driver logs: {e}")
 
 
 _SPARK_SCRIPT = """\
