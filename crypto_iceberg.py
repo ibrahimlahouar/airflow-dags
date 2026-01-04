@@ -142,7 +142,7 @@ def submit_spark_application(**context) -> str:
     # Retrieve OpenMetadata JWT Token from Airflow Variable or use a placeholder
     # Ideally, store this in an Airflow Variable: 'openmetadata_jwt_token'
     from airflow.models import Variable
-    om_jwt_token = Variable.get("openmetadata_jwt_token", default_var="REPLACE_WITH_YOUR_JWT_TOKEN")
+    om_jwt_token = Variable.get("openmetadata_jwt_token", default_var="eyJraWQiOiJHYjM4OWEtOWY3Ni1nZGpzLWE5MmotMDI0MmJrOTQzNTYiLCJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJvcGVuLW1ldGFkYXRhLm9yZyIsInN1YiI6ImluZ2VzdGlvbi1ib3QiLCJyb2xlcyI6WyJJbmdlc3Rpb25Cb3RSb2xlIl0sImVtYWlsIjoiaW5nZXN0aW9uLWJvdEBvcGVuLW1ldGFkYXRhLm9yZyIsImlzQm90Ijp0cnVlLCJ0b2tlblR5cGUiOiJCT1QiLCJpYXQiOjE3NjczMjU0MzUsImV4cCI6bnVsbH0.IaXHTidmPOku_3Q9wWNaGJ7HNCR6LHleZnklnW8JZ5GoWZsckKfTpKK9wTMd3ULt8nNIA-64e-KEJQ8xuNu3ZINwjyDFEr6w_gAl9DpaCYkwSacUzSbn1q9JtflCjxCSHOmnx8MI8Gsx0gjxlgBIQo7vf7U5bxMO3ahNcpiq5_nsZiCn-qq2tuZ3cup6wRaNkpBSyk34J-t2LMRsu-4veKViHSVzqhfUMcOgFpvGK2wugYv7gJ-i7NV1T4osGrQk_fD1DXeIlJRA5hJLqGl-5lGj1_2qZ60E-WqYG6tDdApLtNz-i8hIIlzlTt7Bv_t_pTMA1qXGJpI_R5iqFBL6LA")
 
     spark_app = {
         "apiVersion": "sparkoperator.k8s.io/v1beta2",
