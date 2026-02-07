@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import timedelta
 
 import requests
@@ -142,34 +143,88 @@ DEFAULT_ARGS = {
 # ──────────────────────────────────────────────────────────────────────
 # Helper functions
 # ──────────────────────────────────────────────────────────────────────
-def _om_headers() -> dict:
-    """Return OpenMetadata API headers with JWT auth."""
-    jwt_token = Variable.get("openmetadata_jwt_token")
+def _om_headers() -> dict | None:
+    """Return OpenMetadata API headers with JWT auth, or None if unavailable."""
+    try:
+        jwt_token = Variable.get("openmetadata_jwt_token")
+    except KeyError:
+        logger.warning("OpenMetadata JWT token not configured in Airflow Variables")
+        return None
     return {
         "Authorization": f"Bearer {jwt_token}",
         "Content-Type": "application/json",
     }
 
 
-def _om_get(endpoint: str, headers: dict, params: dict | None = None):
-    """Make a GET request to OpenMetadata API."""
+def _check_openmetadata_available() -> bool:
+    """Check if OpenMetadata service is reachable."""
+    try:
+        # Try a simple health check endpoint
+        resp = requests.get(
+            f"{OPENMETADATA_API.rstrip('/')}/v1/system/version",
+            timeout=5,
+        )
+        return resp.status_code == 200
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logger.warning(f"OpenMetadata service not reachable: {e}")
+        return False
+
+
+def _om_get(endpoint: str, headers: dict, params: dict | None = None, retries: int = 2):
+    """Make a GET request to OpenMetadata API with retry logic."""
     url = f"{OPENMETADATA_API.rstrip('/')}/{endpoint.lstrip('/')}"
-    resp = requests.get(url, headers=headers, params=params, timeout=30)
-    return resp
+    
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            return resp
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retries:
+                wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s
+                logger.warning(f"OpenMetadata connection failed (attempt {attempt + 1}/{retries + 1}), retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Failed to connect to OpenMetadata after {retries + 1} attempts: {e}")
+                raise
+    return None
 
 
-def _om_post(endpoint: str, headers: dict, payload: dict):
-    """Make a POST request to OpenMetadata API."""
+def _om_post(endpoint: str, headers: dict, payload: dict, retries: int = 2):
+    """Make a POST request to OpenMetadata API with retry logic."""
     url = f"{OPENMETADATA_API.rstrip('/')}/{endpoint.lstrip('/')}"
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-    return resp
+    
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            return resp
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retries:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"OpenMetadata connection failed (attempt {attempt + 1}/{retries + 1}), retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Failed to connect to OpenMetadata after {retries + 1} attempts: {e}")
+                raise
+    return None
 
 
-def _om_put(endpoint: str, headers: dict, payload: dict):
-    """Make a PUT request to OpenMetadata API."""
+def _om_put(endpoint: str, headers: dict, payload: dict, retries: int = 2):
+    """Make a PUT request to OpenMetadata API with retry logic."""
     url = f"{OPENMETADATA_API.rstrip('/')}/{endpoint.lstrip('/')}"
-    resp = requests.put(url, headers=headers, json=payload, timeout=30)
-    return resp
+    
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.put(url, headers=headers, json=payload, timeout=10)
+            return resp
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retries:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"OpenMetadata connection failed (attempt {attempt + 1}/{retries + 1}), retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Failed to connect to OpenMetadata after {retries + 1} attempts: {e}")
+                raise
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -180,24 +235,50 @@ def validate_tables(**context):
     Check that all configured tables are registered in the OpenMetadata catalog.
     Returns list of validated table entities.
     """
+    # Check if OpenMetadata is available
+    if not _check_openmetadata_available():
+        error_msg = (
+            f"OpenMetadata service is not reachable at {OPENMETADATA_API}. "
+            "Please check:\n"
+            "1. OpenMetadata pods are running: kubectl get pods -n openmetadata\n"
+            "2. Service is accessible: kubectl get svc -n openmetadata\n"
+            "3. Network policies allow connection from Airflow namespace"
+        )
+        logger.error(error_msg)
+        raise ConnectionError(error_msg)
+    
     headers = _om_headers()
+    if not headers:
+        error_msg = (
+            "OpenMetadata JWT token not configured. "
+            "Set Airflow Variable 'openmetadata_jwt_token' with a valid JWT token."
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
     table_fqns = context["params"].get("table_fqns", DEFAULT_TABLE_FQNS)
 
     validated_tables = []
     missing_tables = []
 
     for fqn in table_fqns:
-        resp = _om_get(
-            f"v1/tables/name/{fqn}",
-            headers=headers,
-            params={"fields": "columns,profile,testSuite,tags,owner"},
-        )
+        try:
+            resp = _om_get(
+                f"v1/tables/name/{fqn}",
+                headers=headers,
+                params={"fields": "columns,profile,testSuite,tags"},
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logger.error(f"Failed to connect to OpenMetadata while checking table {fqn}: {e}")
+            missing_tables.append(fqn)
+            continue
 
         if resp.status_code == 200:
             table = resp.json()
             col_count = len(table.get("columns", []))
             has_profile = table.get("profile") is not None
-            has_owner = table.get("owner") is not None
+            # Owner is accessed via owners array, not owner field
+            has_owner = bool(table.get("owners") and len(table.get("owners", [])) > 0)
 
             validated_tables.append({
                 "fqn": fqn,
@@ -216,6 +297,29 @@ def validate_tables(**context):
             logger.warning(f"[MISSING] {fqn} - not found in OpenMetadata")
         else:
             logger.error(f"[ERROR] {fqn} - API returned {resp.status_code}: {resp.text}")
+            # If it's a 400 error, try without fields parameter
+            if resp.status_code == 400:
+                logger.info(f"Retrying {fqn} without fields parameter...")
+                try:
+                    resp2 = _om_get(f"v1/tables/name/{fqn}", headers=headers, params=None)
+                    if resp2.status_code == 200:
+                        table = resp2.json()
+                        col_count = len(table.get("columns", []))
+                        validated_tables.append({
+                            "fqn": fqn,
+                            "id": table["id"],
+                            "columns": col_count,
+                            "has_profile": False,
+                            "has_owner": False,
+                        })
+                        logger.info(f"[OK] {fqn} - {col_count} columns (retrieved without fields)")
+                    else:
+                        missing_tables.append(fqn)
+                except Exception as e2:
+                    logger.error(f"Retry also failed for {fqn}: {e2}")
+                    missing_tables.append(fqn)
+            else:
+                missing_tables.append(fqn)
 
     if missing_tables:
         logger.warning(
@@ -278,12 +382,17 @@ def check_data_profiles(**context):
             profile_results.append({"fqn": fqn, "status": "error"})
 
         # Get column-level profile
-        resp = _om_get(
-            f"v1/tables/name/{fqn}",
-            headers=headers,
-            params={"fields": "profile,columns"},
-        )
-        if resp.ok:
+        try:
+            resp = _om_get(
+                f"v1/tables/name/{fqn}",
+                headers=headers,
+                params={"fields": "profile,columns"},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to get column profile for {fqn}: {e}")
+            resp = None
+        
+        if resp and resp.ok:
             table_data = resp.json()
             columns = table_data.get("columns", [])
             for col_info in columns:
