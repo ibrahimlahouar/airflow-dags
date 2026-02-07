@@ -718,55 +718,33 @@ def main(raw_input_path: str, ingestion_date: str) -> None:
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS nessie.weather")
 
-    # Vérifier si la table existe et est accessible
-    table_valid = False
+    # Toujours DROP puis CREATE pour éviter les métadonnées Iceberg corrompues.
+    # (Nessie peut garder une référence vers des metadata S3 supprimées.)
+    # On ne lit jamais la table avant, pour ne pas déclencher FileNotFoundException.
     try:
-        # Essayer de lire la table pour vérifier si elle existe et est valide
-        test_df = spark.table("nessie.weather.hourly_forecast")
-        # Essayer de lire les métadonnées (ne pas charger toutes les données)
-        test_df.schema  # Accède au schéma pour vérifier que les métadonnées sont accessibles
-        table_valid = True
-        print("Table exists and is valid, will append data...")
+        spark.sql("DROP TABLE IF EXISTS nessie.weather.hourly_forecast")
+        print("Dropped existing table (if any)")
     except Exception as e:
-        error_msg = str(e)
-        # Si l'erreur indique que les métadonnées sont manquantes, supprimer et recréer
-        if "FileNotFoundException" in error_msg or "No such file or directory" in error_msg or "metadata" in error_msg.lower():
-            print(f"Table metadata is corrupted or missing: {e}")
-            print("Dropping corrupted table and recreating...")
-            try:
-                spark.sql("DROP TABLE IF EXISTS nessie.weather.hourly_forecast")
-            except Exception as drop_err:
-                print(f"Note: Could not drop table cleanly: {drop_err}")
-                # Essayer de supprimer via Nessie directement
-                try:
-                    spark.sql("DROP TABLE nessie.weather.hourly_forecast")
-                except Exception:
-                    pass  # Ignore, on va recréer de toute façon
-            table_valid = False
-        else:
-            # Autre erreur, peut-être que la table n'existe pas simplement
-            print(f"Table may not exist: {e}")
-            table_valid = False
-    
-    # Créer la table seulement si elle n'existe pas ou est corrompue
-    if not table_valid:
-        spark.sql(\"\"\"
-            CREATE TABLE IF NOT EXISTS nessie.weather.hourly_forecast (
-                city_name STRING,
-                latitude DOUBLE,
-                longitude DOUBLE,
-                forecast_time TIMESTAMP,
-                temperature_c DOUBLE,
-                humidity_pct DOUBLE,
-                precipitation_mm DOUBLE,
-                wind_speed_kmh DOUBLE,
-                api_timestamp BIGINT,
-                ingestion_time TIMESTAMP,
-                ingestion_date DATE
-            ) USING iceberg
-            PARTITIONED BY (ingestion_date)
-        \"\"\")
-        print("Table created successfully")
+        print(f"Note on DROP (ignored): {e}")
+
+    # Recréer la table proprement
+    spark.sql(\"\"\"
+        CREATE TABLE nessie.weather.hourly_forecast (
+            city_name STRING,
+            latitude DOUBLE,
+            longitude DOUBLE,
+            forecast_time TIMESTAMP,
+            temperature_c DOUBLE,
+            humidity_pct DOUBLE,
+            precipitation_mm DOUBLE,
+            wind_speed_kmh DOUBLE,
+            api_timestamp BIGINT,
+            ingestion_time TIMESTAMP,
+            ingestion_date DATE
+        ) USING iceberg
+        PARTITIONED BY (ingestion_date)
+    \"\"\")
+    print("Table created successfully")
 
     exploded.writeTo("nessie.weather.hourly_forecast").append()
     row_count = exploded.count()
