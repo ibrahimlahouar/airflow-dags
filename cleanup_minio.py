@@ -310,6 +310,11 @@ def main():
         action="store_true",
         help="Confirmer la suppression (requis pour exécuter réellement)",
     )
+    parser.add_argument(
+        "--auto-confirm",
+        action="store_true",
+        help="Confirmation automatique (pour exécution non-interactive depuis Airflow)",
+    )
     
     args = parser.parse_args()
     
@@ -317,9 +322,11 @@ def main():
         print("⚠️  ATTENTION: Ce script va supprimer des données!")
         print("   Utilisez --dry-run pour voir ce qui sera supprimé")
         print("   Utilisez --confirm pour confirmer la suppression")
+        print("   Utilisez --auto-confirm pour confirmation automatique (Airflow)")
         print("\n   Exemple:")
         print("     python cleanup_minio.py --dry-run")
         print("     python cleanup_minio.py --confirm")
+        print("     python cleanup_minio.py --confirm --auto-confirm  # Pour Airflow")
         sys.exit(1)
     
     print("="*60)
@@ -343,10 +350,17 @@ def main():
     print()
     
     if not args.dry_run:
-        response = input("⚠️  Confirmez-vous la suppression? (tapez 'yes' pour confirmer): ")
-        if response.lower() != "yes":
-            print("Annulé.")
-            sys.exit(0)
+        if args.auto_confirm:
+            print("✓ Confirmation automatique activée (mode non-interactif)")
+        else:
+            try:
+                response = input("⚠️  Confirmez-vous la suppression? (tapez 'yes' pour confirmer): ")
+                if response.lower() != "yes":
+                    print("Annulé.")
+                    sys.exit(0)
+            except EOFError:
+                print("⚠️  Pas d'entrée interactive disponible. Utilisez --auto-confirm pour exécution non-interactive.")
+                sys.exit(1)
     
     try:
         s3 = get_minio_client()

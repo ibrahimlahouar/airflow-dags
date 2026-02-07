@@ -40,9 +40,9 @@ def cleanup_minio(**context):
     logger.info(f"Script: {script_path}")
     
     try:
-        # Exécuter le script avec --confirm
+        # Exécuter le script avec --confirm --auto-confirm (mode non-interactif pour Airflow)
         result = subprocess.run(
-            [sys.executable, script_path, "--confirm"],
+            [sys.executable, script_path, "--confirm", "--auto-confirm"],
             capture_output=True,
             text=True,
             timeout=600,  # 10 minutes max
