@@ -128,46 +128,27 @@ def _om_delete(endpoint: str, headers: dict) -> requests.Response:
     return resp
 
 
-def discover_trino_tables(**context) -> Dict[str, Any]:
+def _discover_trino_tables() -> List[Dict[str, Any]]:
     """Discover existing tables in Trino."""
-    import subprocess
-    import json
-
     discovered_tables = []
     
-    # Try to query Trino to discover tables
-    try:
-        # Use Trino CLI or REST API to list tables
-        # For now, we'll use the known tables and verify they exist
-        for table_path in TRINO_TABLES:
-            parts = table_path.split(".")
-            if len(parts) == 3:
-                catalog, schema, table = parts
-                discovered_tables.append({
-                    "catalog": catalog,
-                    "schema": schema,
-                    "table": table,
-                    "fqn": table_path,
-                })
-                logger.info(f"Will ingest Trino table: {table_path}")
-    except Exception as e:
-        logger.warning(f"Could not discover Trino tables: {e}")
-        # Fallback to known tables
-        for table_path in TRINO_TABLES:
-            parts = table_path.split(".")
-            if len(parts) == 3:
-                catalog, schema, table = parts
-                discovered_tables.append({
-                    "catalog": catalog,
-                    "schema": schema,
-                    "table": table,
-                    "fqn": table_path,
-                })
+    # Use known tables (can be extended to query Trino API)
+    for table_path in TRINO_TABLES:
+        parts = table_path.split(".")
+        if len(parts) == 3:
+            catalog, schema, table = parts
+            discovered_tables.append({
+                "catalog": catalog,
+                "schema": schema,
+                "table": table,
+                "fqn": table_path,
+            })
+            logger.info(f"Will ingest Trino table: {table_path}")
 
-    return {"tables": discovered_tables}
+    return discovered_tables
 
 
-def discover_postgres_tables(**context) -> Dict[str, Any]:
+def _discover_postgres_tables() -> List[Dict[str, Any]]:
     """Discover existing tables in PostgreSQL."""
     import psycopg2
 
@@ -190,6 +171,7 @@ def discover_postgres_tables(**context) -> Dict[str, Any]:
             """)
             for schema, table in cur.fetchall():
                 table_fqn = f"{schema}.{table}"
+                # Only include known tables
                 if table_fqn in POSTGRES_TABLES or table in [t.split(".")[-1] for t in POSTGRES_TABLES]:
                     discovered_tables.append({
                         "schema": schema,
@@ -211,7 +193,7 @@ def discover_postgres_tables(**context) -> Dict[str, Any]:
                     "fqn": table_path,
                 })
 
-    return {"tables": discovered_tables}
+    return discovered_tables
 
 
 def _service_exists(service_name: str, service_type: str, headers: dict) -> Optional[Dict[str, Any]]:
@@ -309,7 +291,8 @@ def create_trino_service(**context) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────
 def discover_trino_tables_task(**context) -> Dict[str, Any]:
     """Discover existing tables in Trino."""
-    return discover_trino_tables(**context)
+    tables = _discover_trino_tables()
+    return {"tables": tables}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -449,7 +432,8 @@ def create_trino_profiler(**context) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────
 def discover_postgres_tables_task(**context) -> Dict[str, Any]:
     """Discover existing tables in PostgreSQL."""
-    return discover_postgres_tables(**context)
+    tables = _discover_postgres_tables()
+    return {"tables": tables}
 
 
 # ──────────────────────────────────────────────────────────────────────
