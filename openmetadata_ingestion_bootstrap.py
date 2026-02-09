@@ -151,7 +151,17 @@ def create_trino_service(**context) -> Dict[str, Any]:
     existing = _service_exists(TRINO_SERVICE_NAME, "Trino", headers)
     if existing:
         logger.info(f"Trino service already exists: {existing['fullyQualifiedName']} (id={existing['id']})")
-        return {"service_id": existing["id"], "service_fqn": existing["fullyQualifiedName"], "created": False}
+        # Verify it's actually Trino service, not another service
+        if existing.get("name") != TRINO_SERVICE_NAME or existing.get("serviceType") != "Trino":
+            logger.warning(f"Found service with wrong name/type: {existing.get('name')}/{existing.get('serviceType')}")
+            # Delete it and recreate
+            try:
+                _om_delete(f"v1/services/databaseServices/{existing['id']}?recursive=true&hardDelete=true", headers=headers)
+                logger.info(f"Deleted incorrect service: {existing['id']}")
+            except Exception as e:
+                logger.warning(f"Could not delete incorrect service: {e}")
+        else:
+            return {"service_id": existing["id"], "service_fqn": existing["fullyQualifiedName"], "created": False}
 
     # Create Trino service
     service_payload = {
