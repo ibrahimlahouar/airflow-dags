@@ -110,6 +110,13 @@ def _om_patch(endpoint: str, headers: dict, payload: dict) -> requests.Response:
     return resp
 
 
+def _om_delete(endpoint: str, headers: dict) -> requests.Response:
+    """Make a DELETE request to OpenMetadata API."""
+    url = f"{OPENMETADATA_API.rstrip('/')}/{endpoint.lstrip('/')}"
+    resp = requests.delete(url, headers=headers, timeout=30)
+    return resp
+
+
 def _service_exists(service_name: str, service_type: str, headers: dict) -> Optional[Dict[str, Any]]:
     """Check if a database service exists in OpenMetadata."""
     resp = _om_get(
