@@ -195,6 +195,8 @@ def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
     """Create Trino metadata ingestion pipeline."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_trino_service")
+    if not xcom:
+        raise ValueError("create_trino_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
 
     # Check if pipeline already exists
@@ -244,6 +246,8 @@ def create_trino_profiler(**context) -> Dict[str, Any]:
     """Create Trino profiler pipeline."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_trino_service")
+    if not xcom:
+        raise ValueError("create_trino_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
 
     # Check if pipeline already exists
@@ -343,6 +347,8 @@ def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
     """Create PostgreSQL metadata ingestion pipeline."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_postgres_service")
+    if not xcom:
+        raise ValueError("create_postgres_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
 
     # Check if pipeline already exists
@@ -392,6 +398,8 @@ def create_postgres_profiler(**context) -> Dict[str, Any]:
     """Create PostgreSQL profiler pipeline."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_postgres_service")
+    if not xcom:
+        raise ValueError("create_postgres_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
 
     # Check if pipeline already exists
