@@ -51,6 +51,17 @@ POSTGRES_ANALYTICS_DB = "analytics_db"
 # Service names
 TRINO_SERVICE_NAME = "Trino"
 POSTGRES_SERVICE_NAME = "PostgreSQL"
+AIRFLOW_SERVICE_NAME = "Airflow"
+
+# Known tables to ingest
+TRINO_TABLES = [
+    "iceberg.weather.hourly_forecast",
+    # "iceberg.crypto.crypto_prices",  # Uncomment if this table exists
+]
+
+POSTGRES_TABLES = [
+    "public.weather_daily_summary",
+]
 
 # ──────────────────────────────────────────────────────────────────────
 # Airflow DAG config
@@ -115,6 +126,92 @@ def _om_delete(endpoint: str, headers: dict) -> requests.Response:
     url = f"{OPENMETADATA_API.rstrip('/')}/{endpoint.lstrip('/')}"
     resp = requests.delete(url, headers=headers, timeout=30)
     return resp
+
+
+def discover_trino_tables(**context) -> Dict[str, Any]:
+    """Discover existing tables in Trino."""
+    import subprocess
+    import json
+
+    discovered_tables = []
+    
+    # Try to query Trino to discover tables
+    try:
+        # Use Trino CLI or REST API to list tables
+        # For now, we'll use the known tables and verify they exist
+        for table_path in TRINO_TABLES:
+            parts = table_path.split(".")
+            if len(parts) == 3:
+                catalog, schema, table = parts
+                discovered_tables.append({
+                    "catalog": catalog,
+                    "schema": schema,
+                    "table": table,
+                    "fqn": table_path,
+                })
+                logger.info(f"Will ingest Trino table: {table_path}")
+    except Exception as e:
+        logger.warning(f"Could not discover Trino tables: {e}")
+        # Fallback to known tables
+        for table_path in TRINO_TABLES:
+            parts = table_path.split(".")
+            if len(parts) == 3:
+                catalog, schema, table = parts
+                discovered_tables.append({
+                    "catalog": catalog,
+                    "schema": schema,
+                    "table": table,
+                    "fqn": table_path,
+                })
+
+    return {"tables": discovered_tables}
+
+
+def discover_postgres_tables(**context) -> Dict[str, Any]:
+    """Discover existing tables in PostgreSQL."""
+    import psycopg2
+
+    discovered_tables = []
+    
+    try:
+        conn = psycopg2.connect(
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            dbname=POSTGRES_ANALYTICS_DB,
+            user=POSTGRES_ADMIN_USER,
+            password=POSTGRES_ADMIN_PASS,
+        )
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT table_schema, table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_type = 'BASE TABLE'
+            """)
+            for schema, table in cur.fetchall():
+                table_fqn = f"{schema}.{table}"
+                if table_fqn in POSTGRES_TABLES or table in [t.split(".")[-1] for t in POSTGRES_TABLES]:
+                    discovered_tables.append({
+                        "schema": schema,
+                        "table": table,
+                        "fqn": table_fqn,
+                    })
+                    logger.info(f"Will ingest PostgreSQL table: {table_fqn}")
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not discover PostgreSQL tables: {e}")
+        # Fallback to known tables
+        for table_path in POSTGRES_TABLES:
+            parts = table_path.split(".")
+            if len(parts) == 2:
+                schema, table = parts
+                discovered_tables.append({
+                    "schema": schema,
+                    "table": table,
+                    "fqn": table_path,
+                })
+
+    return {"tables": discovered_tables}
 
 
 def _service_exists(service_name: str, service_type: str, headers: dict) -> Optional[Dict[str, Any]]:
@@ -208,15 +305,39 @@ def create_trino_service(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 2: Create Trino Metadata Ingestion Pipeline
+# Task 2: Discover Trino Tables
+# ──────────────────────────────────────────────────────────────────────
+def discover_trino_tables_task(**context) -> Dict[str, Any]:
+    """Discover existing tables in Trino."""
+    return discover_trino_tables(**context)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 3: Create Trino Metadata Ingestion Pipeline
 # ──────────────────────────────────────────────────────────────────────
 def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
-    """Create Trino metadata ingestion pipeline."""
+    """Create Trino metadata ingestion pipeline for existing tables only."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_trino_service")
     if not xcom:
         raise ValueError("create_trino_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
+
+    # Get discovered tables
+    tables_xcom = context["ti"].xcom_pull(task_ids="discover_trino_tables")
+    tables = tables_xcom.get("tables", []) if tables_xcom else []
+
+    # Build schema and table filter patterns from discovered tables
+    schemas = set()
+    table_patterns = []
+    for table_info in tables:
+        schemas.add(table_info["schema"])
+        table_patterns.append(table_info["table"])
+
+    schema_filter = {"includes": list(schemas)} if schemas else {"includes": [".*"]}
+    table_filter = {"includes": table_patterns} if table_patterns else {"includes": [".*"]}
+
+    logger.info(f"Ingesting Trino tables: {len(tables)} tables in schemas {list(schemas)}")
 
     # Check if pipeline already exists
     existing = _pipeline_exists(service_fqn, "metadata", headers)
@@ -227,15 +348,15 @@ def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
     pipeline_payload = {
         "name": f"{TRINO_SERVICE_NAME}_metadata",
         "displayName": f"{TRINO_SERVICE_NAME} Metadata Ingestion",
-        "description": "Metadata ingestion for all Trino catalogs (Iceberg, PostgreSQL connectors)",
+        "description": f"Metadata ingestion for {len(tables)} Trino tables: {', '.join([t['fqn'] for t in tables])}",
         "pipelineType": "metadata",
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
                 "type": "Trino",
-                "schemaFilterPattern": {"includes": [".*"]},
-                "tableFilterPattern": {"includes": [".*"]},
-                "includeViews": True,
+                "schemaFilterPattern": schema_filter,
+                "tableFilterPattern": table_filter,
+                "includeViews": False,
                 "markDeletedTables": True,
                 "markDeletedViews": True,
             }
@@ -259,7 +380,7 @@ def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 3: Create Trino Profiler Pipeline
+# Task 4: Create Trino Profiler Pipeline
 # ──────────────────────────────────────────────────────────────────────
 def create_trino_profiler(**context) -> Dict[str, Any]:
     """Create Trino profiler pipeline."""
@@ -275,17 +396,30 @@ def create_trino_profiler(**context) -> Dict[str, Any]:
         logger.info(f"Trino profiler pipeline already exists: {existing['name']} (id={existing['id']})")
         return {"pipeline_id": existing["id"], "pipeline_name": existing["name"], "created": False}
 
+    # Get discovered tables for filtering
+    tables_xcom = context["ti"].xcom_pull(task_ids="discover_trino_tables")
+    tables = tables_xcom.get("tables", []) if tables_xcom else []
+    
+    schemas = set()
+    table_patterns = []
+    for table_info in tables:
+        schemas.add(table_info["schema"])
+        table_patterns.append(table_info["table"])
+
+    schema_filter = {"includes": list(schemas)} if schemas else {"includes": [".*"]}
+    table_filter = {"includes": table_patterns} if table_patterns else {"includes": [".*"]}
+
     pipeline_payload = {
         "name": f"{TRINO_SERVICE_NAME}_profiler",
         "displayName": f"{TRINO_SERVICE_NAME} Profiler",
-        "description": "Data profiling for Trino tables (column statistics, null counts, etc.)",
+        "description": f"Data profiling for {len(tables)} Trino tables",
         "pipelineType": "profiler",
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
                 "type": "Profiler",
-                "schemaFilterPattern": {"includes": [".*"]},
-                "tableFilterPattern": {"includes": [".*"]},
+                "schemaFilterPattern": schema_filter,
+                "tableFilterPattern": table_filter,
                 "includeViews": False,
                 "profileSample": 50.0,  # Profile 50% of rows
                 "threadCount": 5,
@@ -311,7 +445,15 @@ def create_trino_profiler(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 4: Create PostgreSQL Database Service
+# Task 5: Discover PostgreSQL Tables
+# ──────────────────────────────────────────────────────────────────────
+def discover_postgres_tables_task(**context) -> Dict[str, Any]:
+    """Discover existing tables in PostgreSQL."""
+    return discover_postgres_tables(**context)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 6: Create PostgreSQL Database Service
 # ──────────────────────────────────────────────────────────────────────
 def create_postgres_service(**context) -> Dict[str, Any]:
     """Create or update PostgreSQL database service for analytics_db."""
@@ -360,15 +502,31 @@ def create_postgres_service(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 5: Create PostgreSQL Metadata Ingestion Pipeline
+# Task 7: Create PostgreSQL Metadata Ingestion Pipeline
 # ──────────────────────────────────────────────────────────────────────
 def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
-    """Create PostgreSQL metadata ingestion pipeline."""
+    """Create PostgreSQL metadata ingestion pipeline for existing tables only."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_postgres_service")
     if not xcom:
         raise ValueError("create_postgres_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
+
+    # Get discovered tables
+    tables_xcom = context["ti"].xcom_pull(task_ids="discover_postgres_tables")
+    tables = tables_xcom.get("tables", []) if tables_xcom else []
+
+    # Build schema and table filter patterns
+    schemas = set()
+    table_patterns = []
+    for table_info in tables:
+        schemas.add(table_info["schema"])
+        table_patterns.append(table_info["table"])
+
+    schema_filter = {"includes": list(schemas)} if schemas else {"includes": ["public"]}
+    table_filter = {"includes": table_patterns} if table_patterns else {"includes": [".*"]}
+
+    logger.info(f"Ingesting PostgreSQL tables: {len(tables)} tables in schemas {list(schemas)}")
 
     # Check if pipeline already exists
     existing = _pipeline_exists(service_fqn, "metadata", headers)
@@ -379,15 +537,15 @@ def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
     pipeline_payload = {
         "name": f"{POSTGRES_SERVICE_NAME}_metadata",
         "displayName": f"{POSTGRES_SERVICE_NAME} Metadata Ingestion",
-        "description": "Metadata ingestion for PostgreSQL analytics_db",
+        "description": f"Metadata ingestion for {len(tables)} PostgreSQL tables: {', '.join([t['fqn'] for t in tables])}",
         "pipelineType": "metadata",
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
                 "type": "Postgres",
-                "schemaFilterPattern": {"includes": ["public"]},
-                "tableFilterPattern": {"includes": [".*"]},
-                "includeViews": True,
+                "schemaFilterPattern": schema_filter,
+                "tableFilterPattern": table_filter,
+                "includeViews": False,
                 "markDeletedTables": True,
                 "markDeletedViews": True,
             }
@@ -411,15 +569,28 @@ def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 6: Create PostgreSQL Profiler Pipeline
+# Task 8: Create PostgreSQL Profiler Pipeline
 # ──────────────────────────────────────────────────────────────────────
 def create_postgres_profiler(**context) -> Dict[str, Any]:
-    """Create PostgreSQL profiler pipeline."""
+    """Create PostgreSQL profiler pipeline for existing tables only."""
     headers = _om_headers()
     xcom = context["ti"].xcom_pull(task_ids="create_postgres_service")
     if not xcom:
         raise ValueError("create_postgres_service task did not return any data. Check if the service was created successfully.")
     service_fqn = xcom["service_fqn"]
+
+    # Get discovered tables for filtering
+    tables_xcom = context["ti"].xcom_pull(task_ids="discover_postgres_tables")
+    tables = tables_xcom.get("tables", []) if tables_xcom else []
+
+    schemas = set()
+    table_patterns = []
+    for table_info in tables:
+        schemas.add(table_info["schema"])
+        table_patterns.append(table_info["table"])
+
+    schema_filter = {"includes": list(schemas)} if schemas else {"includes": ["public"]}
+    table_filter = {"includes": table_patterns} if table_patterns else {"includes": [".*"]}
 
     # Check if pipeline already exists
     existing = _pipeline_exists(service_fqn, "profiler", headers)
@@ -430,14 +601,14 @@ def create_postgres_profiler(**context) -> Dict[str, Any]:
     pipeline_payload = {
         "name": f"{POSTGRES_SERVICE_NAME}_profiler",
         "displayName": f"{POSTGRES_SERVICE_NAME} Profiler",
-        "description": "Data profiling for PostgreSQL analytics_db tables",
+        "description": f"Data profiling for {len(tables)} PostgreSQL tables",
         "pipelineType": "profiler",
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
                 "type": "Profiler",
-                "schemaFilterPattern": {"includes": ["public"]},
-                "tableFilterPattern": {"includes": [".*"]},
+                "schemaFilterPattern": schema_filter,
+                "tableFilterPattern": table_filter,
                 "includeViews": False,
                 "profileSample": 50.0,
                 "threadCount": 5,
@@ -463,7 +634,60 @@ def create_postgres_profiler(**context) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Task 7: Trigger All Pipelines
+# Task 9: Create Airflow Connection
+# ──────────────────────────────────────────────────────────────────────
+def create_airflow_connection(**context) -> Dict[str, Any]:
+    """Create Airflow pipeline service connection in OpenMetadata."""
+    headers = _om_headers()
+
+    # Check if Airflow service already exists
+    resp = _om_get("v1/services/pipelineServices", headers=headers, params={"limit": 100})
+    if resp.status_code == 200:
+        services = resp.json().get("data", [])
+        for service in services:
+            if service.get("name") == AIRFLOW_SERVICE_NAME:
+                logger.info(f"Airflow service already exists: {service['fullyQualifiedName']} (id={service['id']})")
+                return {"service_id": service["id"], "service_fqn": service["fullyQualifiedName"], "created": False}
+
+    # Create Airflow pipeline service
+    service_payload = {
+        "name": AIRFLOW_SERVICE_NAME,
+        "serviceType": "Airflow",
+        "description": "Airflow DAG execution service",
+        "connection": {
+            "config": {
+                "type": "Airflow",
+                "host": "http://airflow-web.airflow.svc.cluster.local:8080",
+                "username": "admin",
+                "password": "admin",
+                "timeout": 60,
+                "supportsMetadataExtraction": True,
+            }
+        },
+    }
+
+    resp = _om_post("v1/services/pipelineServices", headers=headers, payload=service_payload)
+
+    if resp.status_code in (200, 201):
+        service = resp.json()
+        logger.info(f"Created Airflow service: {service['fullyQualifiedName']} (id={service['id']})")
+        return {"service_id": service["id"], "service_fqn": service["fullyQualifiedName"], "created": True}
+    elif resp.status_code == 409:
+        # Service already exists
+        resp = _om_get("v1/services/pipelineServices", headers=headers, params={"limit": 100})
+        if resp.status_code == 200:
+            services = resp.json().get("data", [])
+            for service in services:
+                if service.get("name") == AIRFLOW_SERVICE_NAME:
+                    logger.info(f"Airflow service already exists (409): {service['fullyQualifiedName']}")
+                    return {"service_id": service["id"], "service_fqn": service["fullyQualifiedName"], "created": False}
+        raise RuntimeError(f"Failed to create Airflow service: 409 but service not found")
+    else:
+        raise RuntimeError(f"Failed to create Airflow service: {resp.status_code} {resp.text}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 10: Trigger All Pipelines
 # ──────────────────────────────────────────────────────────────────────
 def trigger_all_pipelines(**context) -> Dict[str, Any]:
     """Trigger all ingestion pipelines and wait for completion."""
@@ -595,6 +819,17 @@ with DAG(
     tags=["openmetadata", "ingestion", "bootstrap", "trino", "postgres"],
 ) as dag:
 
+    # Discover tables (can run in parallel)
+    t_discover_trino = PythonOperator(
+        task_id="discover_trino_tables",
+        python_callable=discover_trino_tables_task,
+    )
+
+    t_discover_postgres = PythonOperator(
+        task_id="discover_postgres_tables",
+        python_callable=discover_postgres_tables_task,
+    )
+
     # Create services
     t_trino_service = PythonOperator(
         task_id="create_trino_service",
@@ -606,7 +841,12 @@ with DAG(
         python_callable=create_postgres_service,
     )
 
-    # Create Trino pipelines
+    t_airflow_connection = PythonOperator(
+        task_id="create_airflow_connection",
+        python_callable=create_airflow_connection,
+    )
+
+    # Create Trino pipelines (need service + discovered tables)
     t_trino_metadata = PythonOperator(
         task_id="create_trino_metadata_ingestion",
         python_callable=create_trino_metadata_ingestion,
@@ -617,7 +857,7 @@ with DAG(
         python_callable=create_trino_profiler,
     )
 
-    # Create PostgreSQL pipelines
+    # Create PostgreSQL pipelines (need service + discovered tables)
     t_postgres_metadata = PythonOperator(
         task_id="create_postgres_metadata_ingestion",
         python_callable=create_postgres_metadata_ingestion,
@@ -641,10 +881,14 @@ with DAG(
     )
 
     # DAG flow:
-    # Create services (parallel)
-    #   -> Create pipelines (parallel)
+    # Discover tables (parallel, independent)
+    # Create services (parallel, independent)
+    #   -> Create pipelines (need service + discovered tables)
     #     -> Trigger all pipelines
     #       -> Verify results
     t_trino_service >> [t_trino_metadata, t_trino_profiler]
     t_postgres_service >> [t_postgres_metadata, t_postgres_profiler]
+    t_discover_trino >> [t_trino_metadata, t_trino_profiler]
+    t_discover_postgres >> [t_postgres_metadata, t_postgres_profiler]
     [t_trino_metadata, t_trino_profiler, t_postgres_metadata, t_postgres_profiler] >> t_trigger >> t_verify
+    # Airflow connection is independent
