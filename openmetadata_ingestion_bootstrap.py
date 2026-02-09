@@ -115,12 +115,14 @@ def _service_exists(service_name: str, service_type: str, headers: dict) -> Opti
     resp = _om_get(
         f"v1/services/databaseServices",
         headers=headers,
-        params={"name": service_name, "serviceType": service_type},
+        params={"limit": 100},  # Get all services and filter client-side
     )
     if resp.status_code == 200:
         data = resp.json().get("data", [])
-        if data:
-            return data[0]
+        # Filter by both name and serviceType client-side for accuracy
+        for service in data:
+            if service.get("name") == service_name and service.get("serviceType") == service_type:
+                return service
     return None
 
 
