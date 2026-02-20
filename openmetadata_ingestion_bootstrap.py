@@ -257,14 +257,8 @@ def create_trino_service(**context) -> Dict[str, Any]:
         "connection": {
             "config": {
                 "type": "Trino",
-                "hostPort": TRINO_COORDINATOR,
-                "catalog": None,  # None means all catalogs will be discovered
-                "scheme": "http",
+                "hostPort": TRINO_COORDINATOR.replace("http://", "").replace("https://", ""),
                 "username": "admin",
-                "authType": "none",
-                "supportsMetadataExtraction": True,
-                "supportsProfiler": True,
-                "supportsQueryComment": True,
             }
         },
     }
@@ -460,11 +454,7 @@ def create_postgres_service(**context) -> Dict[str, Any]:
                 "hostPort": f"{POSTGRES_HOST}:{POSTGRES_PORT}",
                 "database": POSTGRES_ANALYTICS_DB,
                 "username": POSTGRES_ADMIN_USER,
-                "password": POSTGRES_ADMIN_PASS,
-                "scheme": "postgresql",
-                "supportsMetadataExtraction": True,
-                "supportsProfiler": True,
-                "supportsQueryComment": True,
+                "authType": {"password": POSTGRES_ADMIN_PASS},
             }
         },
     }
