@@ -109,6 +109,12 @@ def delete_all_services(**context) -> Dict[str, Any]:
         service_id = service["id"]
         service_name = service.get("name", service_id)
         service_fqn = service.get("fullyQualifiedName", service_name)
+
+        protected_services = ["PostgreSQL", "Trino", "Airflow", "MinIO"]
+        if service_name in protected_services:
+            logger.info(f"Skipping protected service: {service_name}")
+            continue
+
         try:
             # Delete with recursive=true to delete related entities
             del_resp = _om_delete(
@@ -163,7 +169,7 @@ def delete_all_connections(**context) -> Dict[str, Any]:
 
 
 def delete_all_tags(**context) -> Dict[str, Any]:
-    """Delete all tags (except system tags)."""
+    """Delete all tags (user explicitly requested wiping all defaults)."""
     headers = _om_headers()
     deleted = []
     failed = []
@@ -179,11 +185,6 @@ def delete_all_tags(**context) -> Dict[str, Any]:
 
     for tag in tags:
         tag_fqn = tag.get("fullyQualifiedName", "")
-        # Skip system tags (they usually start with system. or have specific patterns)
-        if tag_fqn.startswith("system.") or tag.get("system") is True:
-            logger.info(f"Skipping system tag: {tag_fqn}")
-            continue
-
         tag_id = tag["id"]
         tag_name = tag.get("name", tag_id)
         try:
@@ -198,6 +199,43 @@ def delete_all_tags(**context) -> Dict[str, Any]:
             logger.error(f"Error deleting {tag_name}: {e}")
 
     logger.info(f"Tag cleanup: {len(deleted)} deleted, {len(failed)} failed")
+    return {"deleted": deleted, "failed": failed}
+
+
+def delete_all_tables(**context) -> Dict[str, Any]:
+    """Delete all tables."""
+    headers = _om_headers()
+    deleted = []
+    failed = []
+
+    # Get all tables
+    resp = _om_get("v1/tables", headers=headers, params={"limit": 1000})
+    if resp.status_code != 200:
+        logger.error(f"Failed to list tables: {resp.status_code}")
+        return {"deleted": [], "failed": ["Failed to list tables"]}
+
+    tables = resp.json().get("data", [])
+    logger.info(f"Found {len(tables)} tables to delete")
+
+    for table in tables:
+        table_id = table["id"]
+        table_name = table.get("name", table_id)
+        try:
+            del_resp = _om_delete(
+                f"v1/tables/{table_id}?recursive=true&hardDelete=true",
+                headers=headers,
+            )
+            if del_resp.status_code in (200, 204):
+                deleted.append(table_name)
+                logger.info(f"Deleted table: {table_name}")
+            else:
+                failed.append(f"{table_name}: {del_resp.status_code}")
+                logger.warning(f"Failed to delete {table_name}: {del_resp.status_code} {del_resp.text}")
+        except Exception as e:
+            failed.append(f"{table_name}: {str(e)}")
+            logger.error(f"Error deleting {table_name}: {e}")
+
+    logger.info(f"Table cleanup: {len(deleted)} deleted, {len(failed)} failed")
     return {"deleted": deleted, "failed": failed}
 
 
@@ -223,24 +261,29 @@ def verify_cleanup(**context) -> Dict[str, Any]:
     if connections_resp.status_code == 200:
         connections_count = len(connections_resp.json().get("data", []))
 
-    # Check tags (non-system)
+    # Check tags (all)
     tags_resp = _om_get("v1/tags", headers=headers, params={"limit": 100})
     tags_count = 0
     if tags_resp.status_code == 200:
-        tags = tags_resp.json().get("data", [])
-        tags_count = len([t for t in tags if not t.get("fullyQualifiedName", "").startswith("system.")])
+        tags_count = len(tags_resp.json().get("data", []))
+
+    # Check tables
+    tables_resp = _om_get("v1/tables", headers=headers, params={"limit": 100})
+    tables_count = 0
+    if tables_resp.status_code == 200:
+        tables_count = len(tables_resp.json().get("data", []))
 
     logger.info(
         f"Cleanup verification: {services_count} services, {pipelines_count} pipelines, "
-        f"{connections_count} connections, {tags_count} tags remaining"
+        f"{connections_count} connections, {tags_count} tags, {tables_count} tables remaining"
     )
 
-    if services_count == 0 and pipelines_count == 0 and connections_count == 0 and tags_count == 0:
+    if services_count == 0 and pipelines_count == 0 and connections_count == 0 and tags_count == 0 and tables_count == 0:
         logger.info("✅ OpenMetadata cleanup completed successfully!")
     else:
         logger.warning(
             f"⚠️  Some entities remain: {services_count} services, {pipelines_count} pipelines, "
-            f"{connections_count} connections, {tags_count} tags"
+            f"{connections_count} connections, {tags_count} tags, {tables_count} tables"
         )
 
     return {
@@ -248,7 +291,8 @@ def verify_cleanup(**context) -> Dict[str, Any]:
         "pipelines_remaining": pipelines_count,
         "connections_remaining": connections_count,
         "tags_remaining": tags_count,
-        "clean": services_count == 0 and pipelines_count == 0 and connections_count == 0 and tags_count == 0,
+        "tables_remaining": tables_count,
+        "clean": services_count == 0 and pipelines_count == 0 and connections_count == 0 and tags_count == 0 and tables_count == 0,
     }
 
 
@@ -282,10 +326,15 @@ with DAG(
         python_callable=delete_all_tags,
     )
 
+    t_delete_tables = PythonOperator(
+        task_id="delete_all_tables",
+        python_callable=delete_all_tables,
+    )
+
     t_verify = PythonOperator(
         task_id="verify_cleanup",
         python_callable=verify_cleanup,
     )
 
-    # Delete in order: pipelines -> services -> connections -> tags -> verify
-    t_delete_pipelines >> t_delete_services >> t_delete_connections >> t_delete_tags >> t_verify
+    # Delete in order: pipelines -> tables -> services -> connections -> tags -> verify
+    t_delete_pipelines >> t_delete_tables >> t_delete_services >> t_delete_connections >> t_delete_tags >> t_verify
