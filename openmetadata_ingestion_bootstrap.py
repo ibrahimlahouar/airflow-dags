@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ──────────────────────────────────────────────────────────────────────
 OPENMETADATA_API = "http://openmetadata.openmetadata.svc:8585/api"
-TRINO_COORDINATOR = "http://trino-coordinator.trino.svc:8080"
+TRINO_COORDINATOR = "http://trino.trino.svc:8080"
 POSTGRES_HOST = "postgres-shared-postgresql.infra.svc.cluster.local"
 POSTGRES_PORT = 5432
 POSTGRES_ADMIN_USER = "admin"
