@@ -330,7 +330,7 @@ def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
-                "type": "Trino",
+                "type": "DatabaseMetadata",
                 "schemaFilterPattern": schema_filter,
                 "tableFilterPattern": table_filter,
                 "includeViews": False,
@@ -338,6 +338,7 @@ def create_trino_metadata_ingestion(**context) -> Dict[str, Any]:
                 "markDeletedViews": True,
             }
         },
+        "airflowConfig": {"startDate": "2023-01-01T00:00:00Z"},
     }
 
     resp = _om_post("v1/services/ingestionPipelines", headers=headers, payload=pipeline_payload)
@@ -403,6 +404,7 @@ def create_trino_profiler(**context) -> Dict[str, Any]:
                 "timeoutSeconds": 43200,  # 12 hours
             }
         },
+        "airflowConfig": {"startDate": "2023-01-01T00:00:00Z"},
     }
 
     resp = _om_post("v1/services/ingestionPipelines", headers=headers, payload=pipeline_payload)
@@ -516,7 +518,7 @@ def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
         "service": {"id": xcom["service_id"], "type": "databaseService"},
         "sourceConfig": {
             "config": {
-                "type": "Postgres",
+                "type": "DatabaseMetadata",
                 "schemaFilterPattern": schema_filter,
                 "tableFilterPattern": table_filter,
                 "includeViews": False,
@@ -524,6 +526,7 @@ def create_postgres_metadata_ingestion(**context) -> Dict[str, Any]:
                 "markDeletedViews": True,
             }
         },
+        "airflowConfig": {"startDate": "2023-01-01T00:00:00Z"},
     }
 
     resp = _om_post("v1/services/ingestionPipelines", headers=headers, payload=pipeline_payload)
@@ -589,6 +592,7 @@ def create_postgres_profiler(**context) -> Dict[str, Any]:
                 "timeoutSeconds": 43200,
             }
         },
+        "airflowConfig": {"startDate": "2023-01-01T00:00:00Z"},
     }
 
     resp = _om_post("v1/services/ingestionPipelines", headers=headers, payload=pipeline_payload)
